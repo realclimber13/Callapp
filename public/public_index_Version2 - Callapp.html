@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Simple Calling Platform</title>
+  <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+  <style>
+    body { font-family: Arial,sans-serif; max-width:600px; margin:auto; padding:20px;}
+    #users span { margin-right: 10px; cursor:pointer; background:#eee; padding:4px 6px; border-radius:4px;}
+    #callStatus { margin: 10px 0; font-weight:bold; }
+  </style>
+</head>
+<body>
+  <h3>Register or Login</h3>
+  <form id="authForm">
+    <input type="text" id="username" placeholder="Username" required><br>
+    <input type="password" id="password" placeholder="Password" required><br>
+    <button type="submit">Register/Login</button>
+  </form>
+  <div id="main" style="display:none;">
+    <div>
+      <h4>Online Users:</h4>
+      <div id="users"></div>
+    </div>
+    <div id="callStatus"></div>
+    <audio id="remoteAudio" autoplay></audio>
+  </div>
+<script>
+let username, socket, peerConnection, remoteStream, localStream;
+const servers = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const authForm = document.getElementById('authForm');
+const usersDiv = document.getElementById('users');
+const callStatus = document.getElementById('callStatus');
+const mainDiv = document.getElementById('main');
+const remoteAudio = document.getElementById('remoteAudio');
+
+authForm.onsubmit = async e => {
+  e.preventDefault();
+  username = username || document.getElementById('username').value;
+  const password = document.getElementById('password').value;
+  // Try register; if exists, fallback to login
+  let resp = await fetch('/register', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({username,password})
+  });
+  if (!resp.ok) {
+    resp = await fetch('/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username,password})
+    });
+  }
+  if (resp.ok) {
+    authForm.style.display='none';
+    mainDiv.style.display='';
+    socket = io();
+    socket.emit('login', username);
+    socket.on('online-users', showUsers);
+    socket.on('call-made', handleIncomingCall);
+    socket.on('answer-made', handleAnswer);
+    socket.on('ice-candidate', handleRemoteICE);
+  } else {
+    alert('Authentication failed');
+  }
+};
+
+function showUsers(users) {
+  usersDiv.innerHTML = '';
+  users.filter(u=>u!==username).forEach(user => {
+    const span = document.createElement('span');
+    span.textContent = user;
+    span.onclick = () => callUser(user);
+    usersDiv.appendChild(span);
+  });
+}
+
+async function callUser(target) {
+  callStatus.textContent = `Calling ${target}...`;
+  peerConnection?.close?.();
+  peerConnection = createPeerConnection(target);
+  localStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+  localStream.getTracks().forEach(track=>peerConnection.addTrack(track,localStream));
+  const offer = await peerConnection.createOffer();
+  await peerConnection.setLocalDescription(offer);
+  socket.emit('call-user', { target, offer });
+}
+
+function handleIncomingCall({ offer, from }) {
+  callStatus.textContent = `Incoming call from ${from}`;
+  if (!confirm(`${from} is calling. Answer?`)) return;
+  peerConnection?.close?.();
+  peerConnection = createPeerConnection(from);
+  navigator.mediaDevices.getUserMedia({audio:true}).then(stream=>{
+    localStream = stream;
+    stream.getTracks().forEach(track=>peerConnection.addTrack(track,stream));
+    peerConnection.setRemoteDescription(offer).then(async()=>{
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+      socket.emit('make-answer', { target:from, answer });
+    });
+  });
+}
+
+function handleAnswer({ answer, from }) {
+  callStatus.textContent = `In call with ${from}`;
+  peerConnection.setRemoteDescription(answer);
+}
+
+function handleRemoteICE({ candidate }) {
+  peerConnection?.addIceCandidate(candidate);
+}
+
+function createPeerConnection(target) {
+  if (peerConnection) try { peerConnection.close(); } catch {}
+  peerConnection = new RTCPeerConnection(servers);
+  peerConnection.onicecandidate = evt => {
+    if (evt.candidate) socket.emit('ice-candidate', { target, candidate:evt.candidate });
+  };
+  peerConnection.ontrack = evt => {
+    if (!remoteStream) {
+      remoteStream = new MediaStream();
+      remoteAudio.srcObject = remoteStream;
+    }
+    evt.streams[0].getAudioTracks().forEach(t=>remoteStream.addTrack(t));
+  };
+  return peerConnection;
+}
+</script>
+</body>
+</html>
